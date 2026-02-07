@@ -155,6 +155,17 @@ try:
         porcelain = subprocess.check_output(
             ['git', 'status', '--porcelain'],
             text=True, stderr=subprocess.DEVNULL, cwd=work_dir).strip()
+        # Get remote URL for clickable link
+        try:
+            import re as _re
+            remote = subprocess.check_output(
+                ['git', 'remote', 'get-url', 'origin'],
+                text=True, stderr=subprocess.DEVNULL, cwd=work_dir).strip()
+            remote = _re.sub(r'^git@github\.com:', 'https://github.com/', remote)
+            remote = _re.sub(r'^git@([^:]+):', r'https://\1/', remote)
+            remote = _re.sub(r'\.git$', '', remote)
+        except Exception:
+            remote = ''
 
         staged = modified = untracked = 0
         for line in porcelain.split('\n'):
@@ -167,7 +178,7 @@ try:
                 if wt not in (' ', '?'): modified += 1
 
         with open(GIT_CACHE, 'w') as f:
-            f.write(f"{branch}|{staged}|{modified}|{untracked}")
+            f.write(f"{branch}|{staged}|{modified}|{untracked}|{remote}")
     else:
         with open(GIT_CACHE) as f:
             parts = f.read().strip().split('|')
@@ -175,8 +186,14 @@ try:
             staged    = int(parts[1])
             modified  = int(parts[2])
             untracked = int(parts[3])
+            remote    = parts[4] if len(parts) > 4 else ''
 
-    pieces = [branch]
+    # OSC 8 clickable link: Cmd+click (macOS) or Ctrl+click to open
+    if remote:
+        branch_link = f"\033]8;;{remote}\a{branch}\033]8;;\a"
+    else:
+        branch_link = branch
+    pieces = [branch_link]
     if staged:    pieces.append(f"{GREEN}+{staged}{RESET}")
     if modified:  pieces.append(f"{YELLOW}~{modified}{RESET}")
     if untracked: pieces.append(f"{DIM}?{untracked}{RESET}")
