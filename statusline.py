@@ -2,9 +2,8 @@
 """
 Custom Claude Code statusline — text-only, no emojis.
 
-Line 1: model | context tokens/total % | session cost | duration | path
-Line 2: 5h: 45% resets 2:30pm | week: 12% resets feb 10 | extra: $2.15/$50.00
-Line 3: branch +staged ~modified ?untracked | +added/-removed
+Line 1: model | path | branch +staged ~modified ?untracked | +added/-removed
+Line 2: context tokens/total % | session cost | current: x% resets time | weekly: y% resets date | extra usage: $z left
 
 Calls Anthropic OAuth usage API directly for rate limits.
 Git info cached to avoid lag in large repos.
@@ -68,11 +67,8 @@ used_tok = (cur.get('input_tokens') or 0) + \
 # ── Cost & duration ──
 cost_obj     = data.get('cost', {})
 session_cost = cost_obj.get('total_cost_usd') or 0
-duration_ms  = cost_obj.get('total_duration_ms') or 0
 lines_add    = cost_obj.get('total_lines_added') or 0
 lines_rm     = cost_obj.get('total_lines_removed') or 0
-mins = duration_ms // 60000
-secs = (duration_ms % 60000) // 1000
 
 # ── Path ──
 cwd  = data.get('workspace', {}).get('current_dir') or data.get('cwd', '')
@@ -203,53 +199,46 @@ except Exception:
 
 # ════════════════ OUTPUT ════════════════
 
-# Line 1: model | context | cost | duration | path
+# Line 1: model | path | git
+line1_items = [f"{WHITE}{model}{RESET}", path_short]
+if git_info:
+    git_parts = [git_info]
+    if lines_add or lines_rm:
+        git_parts.append(f"{GREEN}+{lines_add}{RESET}/{RED}-{lines_rm}{RESET}")
+    line1_items.append(SEP.join(git_parts))
+sys.stdout.write(SEP.join(line1_items))
+
+# Line 2: context | session cost | current | weekly | extra usage
 ctx_c = usage_color(pct_int)
-line1 = SEP.join([
-    f"{WHITE}{model}{RESET}",
+line2_items = [
     f"{fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
     f"${session_cost:.2f}",
-    f"{mins}m{secs:02d}s",
-    path_short,
-])
-sys.stdout.write(line1)
+]
 
-# Line 2: 5h limit | weekly limit | extra usage
 if usage_data:
-    parts = []
-
     fh = usage_data.get("five_hour") or {}
     fh_pct = round(float(fh.get("utilization") or 0))
     fh_reset = fmt_reset(fh.get("resets_at"), "time")
     fh_c = usage_color(fh_pct)
-    fh_str = f"5h: {fh_c}{fh_pct}%{RESET}"
+    fh_str = f"current: {fh_c}{fh_pct}%{RESET}"
     if fh_reset:
         fh_str += f" resets {fh_reset}"
-    parts.append(fh_str)
+    line2_items.append(fh_str)
 
     sd = usage_data.get("seven_day") or {}
     sd_pct = round(float(sd.get("utilization") or 0))
     sd_reset = fmt_reset(sd.get("resets_at"), "datetime")
     sd_c = usage_color(sd_pct)
-    sd_str = f"week: {sd_c}{sd_pct}%{RESET}"
+    sd_str = f"weekly: {sd_c}{sd_pct}%{RESET}"
     if sd_reset:
         sd_str += f" resets {sd_reset}"
-    parts.append(sd_str)
+    line2_items.append(sd_str)
 
     extra = usage_data.get("extra_usage") or {}
     if extra.get("is_enabled"):
         ex_used  = round(float(extra.get("used_credits") or 0) / 100, 2)
         ex_limit = round(float(extra.get("monthly_limit") or 0) / 100, 2)
         ex_left  = ex_limit - ex_used
-        ex_pct   = round(float(extra.get("utilization") or 0))
-        ex_c     = usage_color(ex_pct)
-        parts.append(f"extra: {ex_c}${ex_used:.2f}{RESET}/${ex_limit:.2f} (${ex_left:.2f} left)")
+        line2_items.append(f"extra usage: ${ex_left:.2f} left")
 
-    sys.stdout.write("\n" + SEP.join(parts))
-
-# Line 3: git (only if in repo)
-if git_info:
-    line3_parts = [git_info]
-    if lines_add or lines_rm:
-        line3_parts.append(f"{GREEN}+{lines_add}{RESET}/{RED}-{lines_rm}{RESET}")
-    sys.stdout.write("\n" + SEP.join(line3_parts))
+sys.stdout.write("\n" + SEP.join(line2_items))
