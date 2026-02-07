@@ -211,8 +211,8 @@ sys.stdout.write(SEP.join(line1_items))
 # Line 2: context | session cost | current | weekly | extra usage
 ctx_c = usage_color(pct_int)
 line2_items = [
-    f"{fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
-    f"${session_cost:.2f}",
+    f"context: {fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
+    f"session: ${session_cost:.2f}",
 ]
 
 if usage_data:
