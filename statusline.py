@@ -3,7 +3,7 @@
 Custom Claude Code statusline — text-only, no emojis.
 
 Line 1: model | path | branch +staged ~modified ?untracked | +added/-removed
-Line 2: context tokens/total % | session cost | current: x% resets time | weekly: y% resets date | extra usage: $z left
+Line 2: context tokens/total % | current: x% resets time | weekly: y% resets date | extra usage: $z left
 
 Calls Anthropic OAuth usage API directly for rate limits.
 Git info cached to avoid lag in large repos.
@@ -64,11 +64,10 @@ used_tok = (cur.get('input_tokens') or 0) + \
            (cur.get('cache_creation_input_tokens') or 0) + \
            (cur.get('cache_read_input_tokens') or 0)
 
-# ── Cost & duration ──
-cost_obj     = data.get('cost', {})
-session_cost = cost_obj.get('total_cost_usd') or 0
-lines_add    = cost_obj.get('total_lines_added') or 0
-lines_rm     = cost_obj.get('total_lines_removed') or 0
+# ── Lines added/removed ──
+cost_obj  = data.get('cost', {})
+lines_add = cost_obj.get('total_lines_added') or 0
+lines_rm  = cost_obj.get('total_lines_removed') or 0
 
 # ── Path ──
 cwd  = data.get('workspace', {}).get('current_dir') or data.get('cwd', '')
@@ -208,11 +207,10 @@ if git_info:
     line1_items.append(SEP.join(git_parts))
 sys.stdout.write(SEP.join(line1_items))
 
-# Line 2: context | session cost | current | weekly | extra usage
+# Line 2: context | current | weekly | extra usage
 ctx_c = usage_color(pct_int)
 line2_items = [
     f"context: {fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
-    f"session cost: ${session_cost:.2f}",
 ]
 
 if usage_data:
