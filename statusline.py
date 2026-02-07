@@ -2,46 +2,70 @@
 """
 Custom Claude Code statusline — text-only, no emojis.
 
-Line 1: model | context tokens/total %  | session $/ today $/ block $(time left) | burn rate | path
-Line 2: git branch +staged ~modified ?untracked | +added/-removed
+Line 1: model | context tokens/total % | session cost | duration | path
+Line 2: 5h: 45% resets 2:30pm | week: 12% resets feb 10 | extra: $2.15/$50.00
+Line 3: branch +staged ~modified ?untracked | +added/-removed
 
-Uses native Claude Code JSON for context/cost/git data.
-Calls ccusage as subprocess for daily total, 5h block status, and burn rate.
-Git info cached to /tmp to avoid lag in large repos.
+Calls Anthropic OAuth usage API directly for rate limits.
+Git info cached to avoid lag in large repos.
 """
-import json, sys, subprocess, os, re, time
+import json, sys, subprocess, os, time, urllib.request
+from datetime import datetime
+from pathlib import Path
 
 data = json.load(sys.stdin)
-raw_json = json.dumps(data)
 
-# ── ANSI colors (no emojis) ──
+# ── ANSI (no emojis) ──
 RESET  = '\033[0m'
 DIM    = '\033[2m'
 GREEN  = '\033[32m'
 YELLOW = '\033[33m'
 RED    = '\033[31m'
+CYAN   = '\033[36m'
+WHITE  = '\033[37m'
+SEP    = f" {DIM}|{RESET} "
 
-# ── Model ──
-model = data.get('model', {}).get('display_name', '?')
-
-# ── Context window ──
-ctx       = data.get('context_window', {})
-pct       = ctx.get('used_percentage') or 0
-pct_int   = int(pct)
-total_sz  = ctx.get('context_window_size', 200000)
-cur       = ctx.get('current_usage') or {}
-used_tok  = (cur.get('input_tokens') or 0) + \
-            (cur.get('cache_creation_input_tokens') or 0) + \
-            (cur.get('cache_read_input_tokens') or 0)
 
 def fmt_tok(n):
     if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
     if n >= 1_000:     return f"{n/1_000:.1f}k"
     return str(n)
 
-ctx_color = RED if pct_int >= 90 else YELLOW if pct_int >= 70 else GREEN
 
-# ── Cost & duration (native) ──
+def fmt_reset(iso, style="time"):
+    """Convert ISO reset time to compact local time."""
+    if not iso:
+        return ""
+    try:
+        utc = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        local = utc.astimezone()
+        if style == "time":
+            return local.strftime("%-I:%M%p").lower()
+        return local.strftime("%b %-d, %-I:%M%p").lower()
+    except Exception:
+        return ""
+
+
+def usage_color(pct):
+    if pct >= 90: return RED
+    if pct >= 70: return YELLOW
+    return GREEN
+
+
+# ── Model ──
+model = data.get('model', {}).get('display_name', '?')
+
+# ── Context window ──
+ctx      = data.get('context_window', {})
+pct      = ctx.get('used_percentage') or 0
+pct_int  = int(pct)
+total_sz = ctx.get('context_window_size', 200000)
+cur      = ctx.get('current_usage') or {}
+used_tok = (cur.get('input_tokens') or 0) + \
+           (cur.get('cache_creation_input_tokens') or 0) + \
+           (cur.get('cache_read_input_tokens') or 0)
+
+# ── Cost & duration ──
 cost_obj     = data.get('cost', {})
 session_cost = cost_obj.get('total_cost_usd') or 0
 duration_ms  = cost_obj.get('total_duration_ms') or 0
@@ -50,48 +74,70 @@ lines_rm     = cost_obj.get('total_lines_removed') or 0
 mins = duration_ms // 60000
 secs = (duration_ms % 60000) // 1000
 
-# ── Path (shorten ~) ──
+# ── Path ──
 cwd  = data.get('workspace', {}).get('current_dir') or data.get('cwd', '')
 home = os.path.expanduser('~')
 path_short = ('~' + cwd[len(home):]) if cwd.startswith(home) else cwd
 
-# ── ccusage: daily total, block status, burn rate ──
-CCUSAGE_CACHE = '/tmp/claude-statusline-ccusage-cache'
-CCUSAGE_MAX_AGE = 30  # seconds — ccusage is slower, cache longer
+# ── Usage API (5h, weekly, extra) — cached 60s ──
+USAGE_CACHE = '/tmp/claude-statusline-usage-cache.json'
+USAGE_MAX_AGE = 60
 
-daily = block = burn = ''
-
-def ccusage_cache_stale():
-    if not os.path.exists(CCUSAGE_CACHE):
-        return True
-    return (time.time() - os.path.getmtime(CCUSAGE_CACHE)) > CCUSAGE_MAX_AGE
-
+usage_data = None
 try:
-    if ccusage_cache_stale():
-        out = subprocess.check_output(
-            ['npx', 'ccusage@latest', 'statusline'],
-            input=raw_json, text=True, stderr=subprocess.DEVNULL, timeout=15
-        ).strip()
-        with open(CCUSAGE_CACHE, 'w') as f:
-            f.write(out)
-    else:
-        with open(CCUSAGE_CACHE) as f:
-            out = f.read().strip()
+    needs_refresh = True
+    if os.path.exists(USAGE_CACHE):
+        if (time.time() - os.path.getmtime(USAGE_CACHE)) < USAGE_MAX_AGE:
+            needs_refresh = False
+            with open(USAGE_CACHE) as f:
+                usage_data = json.load(f)
 
-    # Parse ccusage output:
-    # "🤖 Opus | 💰 $0.47 session / $0.09 today / $0.51 block (28m left) | 🔥 $0.13/hr | 🧠 15,500 (8%)"
-    m_daily = re.search(r'(\$[\d.]+)\s*today', out)
-    m_block = re.search(r'(\$[\d.]+)\s*block\s*\(([^)]+)\)', out)
-    m_burn  = re.search(r'(\$[\d.]+/hr)', out)
-    if m_daily: daily = m_daily.group(1)
-    if m_block: block = f"{m_block.group(1)} block ({m_block.group(2)})"
-    if m_burn:  burn = m_burn.group(1)
+    if needs_refresh:
+        token = ""
+        # Try .credentials.json first (Linux/Windows), then macOS Keychain
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if creds_path.exists():
+            creds = json.loads(creds_path.read_text())
+            token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+        if not token and sys.platform == "darwin":
+            try:
+                import getpass
+                kc_out = subprocess.check_output(
+                    ["security", "find-generic-password",
+                     "-s", "Claude Code-credentials",
+                     "-a", getpass.getuser(), "-w"],
+                    text=True, stderr=subprocess.DEVNULL).strip()
+                kc_creds = json.loads(kc_out)
+                token = kc_creds.get("claudeAiOauth", {}).get("accessToken", "")
+            except Exception:
+                pass
+        if token:
+            req = urllib.request.Request(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "User-Agent": "claude-code/2.1.34",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                usage_data = json.loads(resp.read())
+            with open(USAGE_CACHE, 'w') as f:
+                json.dump(usage_data, f)
 except Exception:
-    pass
+    # Fall back to stale cache
+    if os.path.exists(USAGE_CACHE) and usage_data is None:
+        try:
+            with open(USAGE_CACHE) as f:
+                usage_data = json.load(f)
+        except Exception:
+            pass
 
 # ── Git (cached 5s) ──
-GIT_CACHE     = '/tmp/claude-statusline-git-cache'
-GIT_MAX_AGE   = 5
+GIT_CACHE   = '/tmp/claude-statusline-git-cache'
+GIT_MAX_AGE = 5
 
 git_info = ''
 try:
@@ -125,9 +171,9 @@ try:
     else:
         with open(GIT_CACHE) as f:
             parts = f.read().strip().split('|')
-            branch   = parts[0]
-            staged   = int(parts[1])
-            modified = int(parts[2])
+            branch    = parts[0]
+            staged    = int(parts[1])
+            modified  = int(parts[2])
             untracked = int(parts[3])
 
     pieces = [branch]
@@ -138,27 +184,55 @@ try:
 except Exception:
     git_info = ''
 
-# ── Build output ──
-sep = f" {DIM}|{RESET} "
+# ════════════════ OUTPUT ════════════════
 
-# Line 1: model | context | costs | burn | path
-cost_parts = [f"${session_cost:.2f}"]
-if daily: cost_parts.append(f"{daily} today")
-if block: cost_parts.append(block)
-cost_str = ' / '.join(cost_parts)
+# Line 1: model | context | cost | duration | path
+ctx_c = usage_color(pct_int)
+line1 = SEP.join([
+    f"{WHITE}{model}{RESET}",
+    f"{fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
+    f"${session_cost:.2f}",
+    f"{mins}m{secs:02d}s",
+    path_short,
+])
+sys.stdout.write(line1)
 
-line1_items = [
-    model,
-    f"{fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_color}{pct_int}%{RESET}",
-    cost_str,
-]
-if burn: line1_items.append(burn)
-line1_items.append(path_short)
-print(sep.join(line1_items))
+# Line 2: 5h limit | weekly limit | extra usage
+if usage_data:
+    parts = []
 
-# Line 2: git (only if in repo)
+    fh = usage_data.get("five_hour") or {}
+    fh_pct = round(float(fh.get("utilization") or 0))
+    fh_reset = fmt_reset(fh.get("resets_at"), "time")
+    fh_c = usage_color(fh_pct)
+    fh_str = f"5h: {fh_c}{fh_pct}%{RESET}"
+    if fh_reset:
+        fh_str += f" resets {fh_reset}"
+    parts.append(fh_str)
+
+    sd = usage_data.get("seven_day") or {}
+    sd_pct = round(float(sd.get("utilization") or 0))
+    sd_reset = fmt_reset(sd.get("resets_at"), "datetime")
+    sd_c = usage_color(sd_pct)
+    sd_str = f"week: {sd_c}{sd_pct}%{RESET}"
+    if sd_reset:
+        sd_str += f" resets {sd_reset}"
+    parts.append(sd_str)
+
+    extra = usage_data.get("extra_usage") or {}
+    if extra.get("is_enabled"):
+        ex_used  = round(float(extra.get("used_credits") or 0) / 100, 2)
+        ex_limit = round(float(extra.get("monthly_limit") or 0) / 100, 2)
+        ex_left  = ex_limit - ex_used
+        ex_pct   = round(float(extra.get("utilization") or 0))
+        ex_c     = usage_color(ex_pct)
+        parts.append(f"extra: {ex_c}${ex_used:.2f}{RESET}/${ex_limit:.2f} (${ex_left:.2f} left)")
+
+    sys.stdout.write("\n" + SEP.join(parts))
+
+# Line 3: git (only if in repo)
 if git_info:
-    line2_parts = [git_info]
+    line3_parts = [git_info]
     if lines_add or lines_rm:
-        line2_parts.append(f"{GREEN}+{lines_add}{RESET}/{RED}-{lines_rm}{RESET}")
-    print(sep.join(line2_parts))
+        line3_parts.append(f"{GREEN}+{lines_add}{RESET}/{RED}-{lines_rm}{RESET}")
+    sys.stdout.write("\n" + SEP.join(line3_parts))
