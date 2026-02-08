@@ -54,15 +54,16 @@ def usage_color(pct):
 # ── Model ──
 model = data.get('model', {}).get('display_name', '?')
 
-# ── Context window ──
+# ── Context window (measured against autocompact threshold) ──
+COMPACT_RATIO = 0.80  # autocompact fires at ~80% of full window
 ctx      = data.get('context_window', {})
-pct      = ctx.get('used_percentage') or 0
-pct_int  = int(pct)
 total_sz = ctx.get('context_window_size', 200000)
+compact_threshold = int(total_sz * COMPACT_RATIO)
 cur      = ctx.get('current_usage') or {}
 used_tok = (cur.get('input_tokens') or 0) + \
            (cur.get('cache_creation_input_tokens') or 0) + \
            (cur.get('cache_read_input_tokens') or 0)
+pct_int  = min(100, int(used_tok / compact_threshold * 100)) if compact_threshold > 0 else 0
 
 # ── Lines added/removed ──
 cost_obj  = data.get('cost', {})
@@ -210,7 +211,7 @@ sys.stdout.write(SEP.join(line1_items))
 # Line 2: context | current | weekly | extra usage
 ctx_c = usage_color(pct_int)
 line2_items = [
-    f"context: {fmt_tok(used_tok)}/{fmt_tok(total_sz)} {ctx_c}{pct_int}%{RESET}",
+    f"context: {fmt_tok(used_tok)}/{fmt_tok(compact_threshold)} {ctx_c}{pct_int}%{RESET}",
 ]
 
 if usage_data:
